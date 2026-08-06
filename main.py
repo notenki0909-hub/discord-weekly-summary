@@ -253,6 +253,7 @@ def summarize_with_gemini(server_name: str, since: datetime, until: datetime, ch
 
 
 def post_to_discord(channel_id: str, content: str):
+    content = f"@everyone\n{content}"
     chunks = split_for_discord(content)
     total = len(chunks)
     for i, chunk in enumerate(chunks, start=1):
