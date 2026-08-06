@@ -44,6 +44,7 @@ def fetch_config_rows():
     """公開CSVから対象サーバーの設定一覧を取得する。"""
     resp = requests.get(CONFIG_CSV_URL, timeout=30)
     resp.raise_for_status()
+    resp.encoding = "utf-8"  # Google SheetsのCSVは常にUTF-8のため明示する(自動判定だと文字化けすることがある)
     reader = csv.reader(io.StringIO(resp.text))
     rows = list(reader)[CSV_HEADER_ROWS:]
 
