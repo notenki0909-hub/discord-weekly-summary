@@ -23,7 +23,7 @@ GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 CONFIG_CSV_URL = os.environ["CONFIG_CSV_URL"]
 
 DISCORD_API = "https://discord.com/api/v10"
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
 GEMINI_API = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 # データ行の先頭に何行のヘッダー(タイトル・説明・空白・列名ラベル)があるか
