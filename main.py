@@ -29,6 +29,43 @@ GEMINI_API = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_M
 # データ行の先頭に何行のヘッダー(タイトル・説明・空白・列名ラベル)があるか
 CSV_HEADER_ROWS = 5
 
+JST = timezone(timedelta(hours=9))
+WEEKDAY_MAP = {"月": 0, "火": 1, "水": 2, "木": 3, "金": 4, "土": 5, "日": 6}
+
+
+def parse_schedule_days(schedule_str: str) -> set:
+    """「実行曜日」列の文字列を曜日番号の集合に変換する(月曜=0〜日曜=6)。
+    空欄または「毎日」は全曜日を対象とする。"""
+    s = (schedule_str or "").strip()
+    if not s or s == "毎日":
+        return set(range(7))
+    days = set()
+    for part in s.split(","):
+        part = part.strip()
+        if part in WEEKDAY_MAP:
+            days.add(WEEKDAY_MAP[part])
+    return days if days else set(range(7))
+
+
+def compute_lookback_days(schedule_days: set, today_wd: int) -> int:
+    """今日の実行が対象とすべき「何日分遡るか」を、設定された実行曜日から逆算する。
+    例:月・木指定の場合、月曜実行時は4日分(木→月)、木曜実行時は3日分(月→木)。"""
+    if len(schedule_days) >= 7:
+        return 1  # 毎日実行の場合は前日から今日まで
+    if len(schedule_days) == 1:
+        return 7  # 週1回のみの場合は従来通り7日分
+
+    sorted_days = sorted(schedule_days)
+    prev = None
+    for d in reversed(sorted_days):
+        if d < today_wd:
+            prev = d
+            break
+    if prev is None:
+        prev = sorted_days[-1]  # 今日が最小の曜日 → 前週の最後の曜日まで遡る
+    lookback = (today_wd - prev) % 7
+    return lookback if lookback > 0 else 7
+
 LOG_DIR = BASE_DIR / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 logging.basicConfig(
@@ -67,6 +104,7 @@ def fetch_config_rows():
         category_ids = [c.strip() for c in row[5].split(",") if c.strip()]
         extra_channel_ids = [c.strip() for c in row[6].split(",") if c.strip()]
         dest_channel_id = row[7].strip()
+        schedule_str = row[8].strip() if len(row) > 8 else ""
 
         if not enabled or not guild_id or not dest_channel_id:
             continue
@@ -78,6 +116,7 @@ def fetch_config_rows():
                 "category_ids": category_ids,
                 "extra_channel_ids": extra_channel_ids,
                 "dest_channel_id": dest_channel_id,
+                "schedule_days": parse_schedule_days(schedule_str),
             }
         )
     return servers
@@ -180,7 +219,7 @@ def summarize_with_gemini(server_name: str, since: datetime, until: datetime, ch
 
     prompt = (
         "以下はDiscordサーバーの複数チャンネルにおける、指定期間中の投稿ログです。"
-        "日本語で「今週の投稿要点まとめ」を作成してください。\n"
+        "日本語で「投稿要点まとめ」を作成してください。\n"
         "- 冒頭にサーバー名と対象期間を明記する\n"
         "- 投稿があったチャンネルごとに見出しを分ける\n"
         "- 主なトピック・質問と回答・盛り上がった話題を簡潔な箇条書きでまとめる\n"
@@ -247,13 +286,22 @@ def split_for_discord(text: str, limit: int = 1900):
 
 def main():
     now = datetime.now(timezone.utc)
-    since = now - timedelta(days=7)
+    today_wd = now.astimezone(JST).weekday()
 
     servers = fetch_config_rows()
     log.info("対象サーバー数: %d", len(servers))
 
     for server in servers:
-        log.info("処理開始: %s (guild_id=%s)", server["name"], server["guild_id"])
+        if today_wd not in server["schedule_days"]:
+            log.info("%s: 本日は実行曜日ではないためスキップします", server["name"])
+            continue
+
+        lookback_days = compute_lookback_days(server["schedule_days"], today_wd)
+        since = now - timedelta(days=lookback_days)
+        log.info(
+            "処理開始: %s (guild_id=%s, 対象期間=%d日分)",
+            server["name"], server["guild_id"], lookback_days,
+        )
         try:
             channels = get_target_channels(
                 server["guild_id"], server["category_ids"], server["extra_channel_ids"]

@@ -3,8 +3,8 @@ name: Discord Weekly Summary
 on:
   workflow_dispatch: {}
   schedule:
-    # 毎週月曜 00:00 UTC = 日本時間 9:00
-    - cron: "0 0 * * 1"
+    # 毎日 00:00 UTC = 日本時間 9:00(各サーバーごとの実行曜日はスプレッドシート「実行曜日」列で制御)
+    - cron: "0 0 * * *"
 
 jobs:
   summarize:
