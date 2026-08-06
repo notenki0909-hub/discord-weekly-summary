@@ -51,16 +51,6 @@ def fetch_config_rows():
     resp = requests.get(CONFIG_CSV_URL, timeout=30)
     resp.raise_for_status()
 
-    # --- 一時デバッグ:実行環境で受信した生バイトを直接確認する ---
-    log.info("DEBUG Content-Type: %r", resp.headers.get("Content-Type"))
-    log.info("DEBUG Content-Encoding: %r", resp.headers.get("Content-Encoding"))
-    log.info("DEBUG raw content length: %d", len(resp.content))
-    log.info("DEBUG raw content head hex: %s", resp.content[:120].hex())
-    idx = resp.content.find(b"TRUE")
-    if idx >= 0:
-        log.info("DEBUG bytes around first TRUE (hex): %s", resp.content[idx:idx+60].hex())
-    # --- デバッグここまで ---
-
     # resp.encoding/resp.text ではなく、生バイトを明示的にUTF-8デコードする
     # (resp.encoding経由だと環境によって正しく反映されないことがあるため)
     text = resp.content.decode("utf-8")
