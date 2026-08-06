@@ -2,12 +2,18 @@ import csv
 import io
 import logging
 import os
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
+
+# 実行環境のロケールによらずUTF-8で入出力する(GitHub Actions実行環境での文字化け対策)
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
@@ -44,8 +50,10 @@ def fetch_config_rows():
     """公開CSVから対象サーバーの設定一覧を取得する。"""
     resp = requests.get(CONFIG_CSV_URL, timeout=30)
     resp.raise_for_status()
-    resp.encoding = "utf-8"  # Google SheetsのCSVは常にUTF-8のため明示する(自動判定だと文字化けすることがある)
-    reader = csv.reader(io.StringIO(resp.text))
+    # resp.encoding/resp.text ではなく、生バイトを明示的にUTF-8デコードする
+    # (resp.encoding経由だと環境によって正しく反映されないことがあるため)
+    text = resp.content.decode("utf-8")
+    reader = csv.reader(io.StringIO(text))
     rows = list(reader)[CSV_HEADER_ROWS:]
 
     servers = []
