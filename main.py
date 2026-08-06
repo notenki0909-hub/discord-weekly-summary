@@ -66,16 +66,22 @@ def compute_lookback_days(schedule_days: set, today_wd: int) -> int:
     lookback = (today_wd - prev) % 7
     return lookback if lookback > 0 else 7
 
+class JSTFormatter(logging.Formatter):
+    """ログの時刻表示をJST(日本時間)にする(GitHub Actionsランナーの標準時刻はUTCのため)。"""
+
+    def formatTime(self, record, datefmt=None):
+        dt = datetime.fromtimestamp(record.created, tz=JST)
+        return dt.strftime(datefmt or "%Y-%m-%d %H:%M:%S")
+
+
 LOG_DIR = BASE_DIR / "logs"
 LOG_DIR.mkdir(exist_ok=True)
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_DIR / "run.log", encoding="utf-8"),
-        logging.StreamHandler(),
-    ],
-)
+_formatter = JSTFormatter("%(asctime)s JST [%(levelname)s] %(message)s")
+_file_handler = logging.FileHandler(LOG_DIR / "run.log", encoding="utf-8")
+_file_handler.setFormatter(_formatter)
+_stream_handler = logging.StreamHandler()
+_stream_handler.setFormatter(_formatter)
+logging.basicConfig(level=logging.INFO, handlers=[_file_handler, _stream_handler])
 log = logging.getLogger(__name__)
 
 
