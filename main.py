@@ -203,7 +203,10 @@ def fetch_recent_messages(channel_id: str, since: datetime, until: datetime):
 
 
 def summarize_with_gemini(server_name: str, since: datetime, until: datetime, channel_messages: dict) -> str:
-    lines = [f"サーバー名: {server_name}", f"対象期間: {since.strftime('%Y-%m-%d')} 〜 {until.strftime('%Y-%m-%d')}", ""]
+    # 表示用の日付はJSTに変換する(since/untilはUTCで保持しているため)
+    since_jst = since.astimezone(JST)
+    until_jst = until.astimezone(JST)
+    lines = [f"サーバー名: {server_name}", f"対象期間: {since_jst.strftime('%Y-%m-%d')} 〜 {until_jst.strftime('%Y-%m-%d')}", ""]
     any_posts = False
     for ch_name, msgs in channel_messages.items():
         if not msgs:
@@ -215,7 +218,7 @@ def summarize_with_gemini(server_name: str, since: datetime, until: datetime, ch
         lines.append("")
 
     if not any_posts:
-        return f"【{server_name}】{since.strftime('%Y/%m/%d')}〜{until.strftime('%Y/%m/%d')}の期間、対象チャンネルへの投稿はありませんでした。"
+        return f"【{server_name}】{since_jst.strftime('%Y/%m/%d')}〜{until_jst.strftime('%Y/%m/%d')}の期間、対象チャンネルへの投稿はありませんでした。"
 
     raw_text = "\n".join(lines)
     # Gemini入力量が過大にならないよう安全に切り詰める(概算目安)
@@ -291,8 +294,11 @@ def split_for_discord(text: str, limit: int = 1900):
 
 
 def main():
-    now = datetime.now(timezone.utc)
-    today_wd = now.astimezone(JST).weekday()
+    now_jst = datetime.now(timezone.utc).astimezone(JST)
+    today_wd = now_jst.weekday()
+    # 周期の起点/終点は実行時刻(数分〜数十分のズレが生じうる)ではなく、
+    # 日本時間0:00固定とする(実行タイミングのズレによる投稿の重複・漏れを防ぐため)。
+    period_end = now_jst.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
 
     servers = fetch_config_rows()
     log.info("対象サーバー数: %d", len(servers))
@@ -303,10 +309,12 @@ def main():
             continue
 
         lookback_days = compute_lookback_days(server["schedule_days"], today_wd)
-        since = now - timedelta(days=lookback_days)
+        since = period_end - timedelta(days=lookback_days)
         log.info(
-            "処理開始: %s (guild_id=%s, 対象期間=%d日分)",
+            "処理開始: %s (guild_id=%s, 対象期間=%d日分, %s 〜 %s JST)",
             server["name"], server["guild_id"], lookback_days,
+            since.astimezone(JST).strftime("%Y-%m-%d %H:%M"),
+            period_end.astimezone(JST).strftime("%Y-%m-%d %H:%M"),
         )
         try:
             channels = get_target_channels(
@@ -316,12 +324,12 @@ def main():
 
             channel_messages = {}
             for ch in channels:
-                msgs = fetch_recent_messages(ch["id"], since, now)
+                msgs = fetch_recent_messages(ch["id"], since, period_end)
                 channel_messages[ch["name"]] = msgs
                 log.info("  #%s: %d件", ch["name"], len(msgs))
                 time.sleep(0.5)
 
-            summary = summarize_with_gemini(server["name"], since, now, channel_messages)
+            summary = summarize_with_gemini(server["name"], since, period_end, channel_messages)
             post_to_discord(server["dest_channel_id"], summary)
             log.info("%s: 要約投稿完了", server["name"])
         except Exception:
