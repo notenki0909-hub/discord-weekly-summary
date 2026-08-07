@@ -215,7 +215,7 @@ def summarize_with_gemini(server_name: str, since: datetime, until: datetime, ch
         any_posts = True
         lines.append(f"--- #{ch_name} ({len(msgs)}件) ---")
         for m in msgs:
-            lines.append(f"[{m['author']}] {m['content']}")
+            lines.append(m["content"])
         lines.append("")
 
     if not any_posts:
