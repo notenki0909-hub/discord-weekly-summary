@@ -186,7 +186,8 @@ def fetch_recent_messages(channel_id: str, since: datetime, until: datetime):
             if m.get("content"):
                 messages.append(
                     {
-                        "author": m.get("author", {}).get("global_name")
+                        "author": m.get("member", {}).get("nick")
+                        or m.get("author", {}).get("global_name")
                         or m.get("author", {}).get("username", "unknown"),
                         "content": m["content"],
                         "timestamp": ts,
