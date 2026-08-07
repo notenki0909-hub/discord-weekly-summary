@@ -238,13 +238,22 @@ def summarize_with_gemini(server_name: str, since: datetime, until: datetime, ch
         f"{raw_text}"
     )
 
-    resp = requests.post(
-        GEMINI_API,
-        params={"key": GEMINI_API_KEY},
-        json={"contents": [{"parts": [{"text": prompt}]}]},
-        timeout=60,
-    )
-    resp.raise_for_status()
+    resp = None
+    for attempt in range(1, 4):
+        try:
+            resp = requests.post(
+                GEMINI_API,
+                params={"key": GEMINI_API_KEY},
+                json={"contents": [{"parts": [{"text": prompt}]}]},
+                timeout=120,
+            )
+            resp.raise_for_status()
+            break
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+            log.warning("Gemini API呼び出しに失敗しました(%d/3回目): %s", attempt, exc)
+            if attempt == 3:
+                return f"⚠要約生成エラー: Gemini APIへの接続がタイムアウトしました。({server_name})"
+            time.sleep(5 * attempt)
     data = resp.json()
     try:
         return data["candidates"][0]["content"]["parts"][0]["text"].strip()
