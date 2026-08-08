@@ -207,7 +207,7 @@ def summarize_with_gemini(server_name: str, since: datetime, until: datetime, ch
     # 表示用の日付はJSTに変換する(since/untilはUTCで保持しているため)
     since_jst = since.astimezone(JST)
     until_jst = until.astimezone(JST)
-    lines = [f"サーバー名: {server_name}", f"対象期間: {since_jst.strftime('%Y-%m-%d')} 〜 {until_jst.strftime('%Y-%m-%d')}", ""]
+    lines = [f"サーバー名: {server_name}", f"対象期間: {since_jst.strftime('%Y-%m-%d %H:%M')} 〜 {until_jst.strftime('%Y-%m-%d %H:%M')}", ""]
     any_posts = False
     for ch_name, msgs in channel_messages.items():
         if not msgs:
@@ -219,7 +219,7 @@ def summarize_with_gemini(server_name: str, since: datetime, until: datetime, ch
         lines.append("")
 
     if not any_posts:
-        return f"【{server_name}】{since_jst.strftime('%Y/%m/%d')}〜{until_jst.strftime('%Y/%m/%d')}の期間、対象チャンネルへの投稿はありませんでした。"
+        return f"【{server_name}】{since_jst.strftime('%Y/%m/%d %H:%M')}〜{until_jst.strftime('%Y/%m/%d %H:%M')}の期間、対象チャンネルへの投稿はありませんでした。"
 
     raw_text = "\n".join(lines)
     # Gemini入力量が過大にならないよう安全に切り詰める(概算目安)
