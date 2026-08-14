@@ -35,6 +35,7 @@ STAFF_ROLE_NAMES = {
     for n in os.environ.get("STAFF_ROLE_NAMES", "サポーター,認定講師,管理者,サーバー管理").split(",")
     if n.strip()
 }
+ROLE_COUNT_ENABLED = bool(GCP_SERVICE_ACCOUNT_JSON and ROLE_COUNT_SHEET_ID)
 
 DATA_DIR = BASE_DIR / "data"
 AUTHOR_MAP_PATH = DATA_DIR / "author_map.json"
@@ -153,6 +154,27 @@ def get_role_id_to_name(guild_id: str) -> dict:
     return {r["id"]: r["name"] for r in resp.json()}
 
 
+def get_guild_member(guild_id: str, user_id: str) -> dict:
+    """サーバーメンバー情報(ニックネーム・ロールID一覧等)を取得する(スタッフ投稿カウント用)。
+
+    GET /channels/.../messages のレスポンスに付随するmember情報(roles)は実機検証の結果
+    常に空配列になることが判明したため(2026-08-14)、投稿者ごとに個別のGET /guilds/.../members/
+    {user.id} を呼んで確実に取得する方式に変更した。呼び出し側で投稿者ごとにキャッシュし、
+    同一投稿者への重複呼び出しを避けること。
+    """
+    resp = requests.get(
+        f"{DISCORD_API}/guilds/{guild_id}/members/{user_id}", headers=discord_headers(), timeout=30
+    )
+    if resp.status_code == 404:
+        return {}  # サーバー退出済み等。nick/rolesなしとして扱う
+    if resp.status_code == 429:
+        retry_after = resp.json().get("retry_after", 1)
+        time.sleep(retry_after + 0.5)
+        return get_guild_member(guild_id, user_id)
+    resp.raise_for_status()
+    return resp.json()
+
+
 def get_target_channels(guild_id: str, category_ids: list, extra_channel_ids: list):
     resp = requests.get(f"{DISCORD_API}/guilds/{guild_id}/channels", headers=discord_headers(), timeout=30)
     resp.raise_for_status()
@@ -174,8 +196,11 @@ def get_target_channels(guild_id: str, category_ids: list, extra_channel_ids: li
     return matched
 
 
-def fetch_recent_messages(channel_id: str, since: datetime, until: datetime):
-    """channel_idから[since, until]範囲内の投稿を取得する(sinceより前に届いたら打ち切り)。"""
+def fetch_recent_messages(channel_id: str, since: datetime, until: datetime, guild_id: str, member_cache: dict):
+    """channel_idから[since, until]範囲内の投稿を取得する(sinceより前に届いたら打ち切り)。
+
+    member_cacheは投稿者ID→get_guild_member()結果のキャッシュ(呼び出し元で1サーバーにつき
+    1つ用意し、複数チャンネル・複数回の呼び出しで使い回すこと)。"""
     messages = []
     before = None
     for _ in range(20):  # 安全のための上限(20回=最大2000件)
@@ -211,7 +236,14 @@ def fetch_recent_messages(channel_id: str, since: datetime, until: datetime):
             if m.get("content"):
                 author = m.get("author", {})
                 author_id = author.get("id", "unknown")
-                member = m.get("member") or {}
+                # スタッフ投稿カウント用(2026-08-14追加)。GET /channels/.../messages のレスポンスに
+                # 付随するmember情報(roles)は実機検証の結果常に空配列だったため、投稿者ごとに
+                # GET /guilds/.../members/{user.id} を個別に呼んで確実に取得する(ROLE_COUNT_ENABLED
+                # がFalseの場合は無駄なAPI呼び出しを避けるためスキップし、role_ids/display_nameは
+                # 空・ユーザー名フォールバックのままにする)。
+                if ROLE_COUNT_ENABLED and author_id not in member_cache:
+                    member_cache[author_id] = get_guild_member(guild_id, author_id)
+                member = member_cache.get(author_id, {})
                 messages.append(
                     {
                         # 実名(ニックネーム)は保存せず、投稿者IDから決定論的に生成した
@@ -223,9 +255,6 @@ def fetch_recent_messages(channel_id: str, since: datetime, until: datetime):
                         # Gemini APIに渡す(同上)。
                         "content": mask_content(m["content"]),
                         "timestamp": ts,
-                        # スタッフロール投稿カウント用(2026-08-14追加)。GET /channels/.../messages
-                        # のレスポンスには投稿者のサーバー内ロールを含むpartial member情報が
-                        # 付随するため、追加のAPI呼び出しなしで取得できる。
                         "role_ids": member.get("roles", []),
                         "display_name": member.get("nick") or author.get("global_name") or author.get("username", "unknown"),
                     }
@@ -382,9 +411,8 @@ def main():
 
     # スタッフロール投稿カウント機能。サービスアカウント未設定の環境(ローカル検証等)
     # でもBot本体の要約・投稿は動くよう、未設定時は機能ごとスキップする。
-    role_count_enabled = bool(GCP_SERVICE_ACCOUNT_JSON and ROLE_COUNT_SHEET_ID)
     all_role_count_rows = []
-    if not role_count_enabled:
+    if not ROLE_COUNT_ENABLED:
         log.info("スタッフ投稿カウント機能は無効です(GCP_SERVICE_ACCOUNT_JSON/ROLE_COUNT_SHEET_ID未設定)")
 
     for server in servers:
@@ -406,9 +434,10 @@ def main():
             )
             log.info("%s: 対象チャンネル数 %d", server["name"], len(channels))
 
+            member_cache = {}
             channel_messages = {}
             for ch in channels:
-                msgs = fetch_recent_messages(ch["id"], since, period_end)
+                msgs = fetch_recent_messages(ch["id"], since, period_end, server["guild_id"], member_cache)
                 channel_messages[ch["name"]] = msgs
                 log.info("  #%s: %d件", ch["name"], len(msgs))
                 time.sleep(0.5)
@@ -417,7 +446,7 @@ def main():
             post_to_discord(server["dest_channel_id"], summary)
             log.info("%s: 要約投稿完了", server["name"])
 
-            if role_count_enabled:
+            if ROLE_COUNT_ENABLED:
                 role_id_to_name = get_role_id_to_name(server["guild_id"])
                 # 原因切り分け用の詳細ログ(2026-08-14追加)。ロール名の不一致
                 # (絵文字・空白・全角半角違い等)やmember情報の欠落を判別できるようにする。
@@ -443,7 +472,7 @@ def main():
 
     pseudonymizer.save()
 
-    if role_count_enabled and all_role_count_rows:
+    if ROLE_COUNT_ENABLED and all_role_count_rows:
         try:
             spreadsheet = sheets_client.connect(GCP_SERVICE_ACCOUNT_JSON, ROLE_COUNT_SHEET_ID)
             ws = sheets_client.get_or_create_worksheet(spreadsheet)
