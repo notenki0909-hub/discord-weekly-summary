@@ -419,6 +419,20 @@ def main():
 
             if role_count_enabled:
                 role_id_to_name = get_role_id_to_name(server["guild_id"])
+                # 原因切り分け用の詳細ログ(2026-08-14追加)。ロール名の不一致
+                # (絵文字・空白・全角半角違い等)やmember情報の欠落を判別できるようにする。
+                matched_role_names = sorted(set(role_id_to_name.values()) & STAFF_ROLE_NAMES)
+                log.info(
+                    "%s: サーバーのロール一覧=%s / STAFF_ROLE_NAMESと一致=%s",
+                    server["name"], sorted(role_id_to_name.values()), matched_role_names,
+                )
+                all_msgs = [m for msgs in channel_messages.values() for m in msgs]
+                msgs_with_role_ids = [m for m in all_msgs if m.get("role_ids")]
+                log.info(
+                    "%s: role_ids保持メッセージ数=%d/全体%d件",
+                    server["name"], len(msgs_with_role_ids), len(all_msgs),
+                )
+
                 staff_counts = count_staff_posts(channel_messages, role_id_to_name, STAFF_ROLE_NAMES)
                 rows = build_role_count_rows(server["name"], staff_counts, since, period_end)
                 all_role_count_rows.extend(rows)
