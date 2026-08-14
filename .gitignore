@@ -1,4 +1,6 @@
 .env
 logs/
+data/
 __pycache__/
 *.pyc
+gcp_service_account.json

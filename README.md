@@ -2,6 +2,8 @@
 
 複数のDiscordサーバーの指定カテゴリー・チャンネルに投稿された内容を読み取り、Gemini APIで日本語要約を作成して、指定チャンネルへ自動投稿する仕組み。GitHub Actions上で毎日9:00(JST)にチェックが走り、サーバーごとにスプレッドシートで指定した「実行曜日」に該当する日だけ要約・投稿が行われる。PCの電源が入っていなくても動作する。無料枠のGemini APIを使うため、追加の月額費用はかからない(想定利用量の範囲内)。
 
+投稿内容はGemini APIに渡す前に個人情報をマスキングする(詳細は下記「個人情報のマスキング」参照)。
+
 - スプレッドシート(対象サーバー設定): https://docs.google.com/spreadsheets/d/16DWNsBuiK6g2bPhfeIWKm9vIvghgNYesDeR_xK1i0DU/edit
 
 ## 対象サーバーの追加方法(GitHub操作は不要)
@@ -48,6 +50,57 @@
 5. チャンネルごとの投稿内容をまとめてGemini APIに渡し、日本語の要約を生成する
 6. 生成した要約を、指定の投稿先チャンネルにDiscord APIで投稿する(2000文字を超える場合は分割投稿)
 
+## 個人情報のマスキング(2026-08-14追加)
+
+「質問回答AI」プロジェクト(discord-qa-extractor)で作成した仕組みを移植したもの。
+Gemini APIに送る前に、`anonymize.py`で以下をマスキングする。
+
+- **投稿者名**: ニックネーム等の実名は保存せず、投稿者IDから決定論的に生成した
+  匿名ラベル(`参加者_xxxxxxxx`)に置き換える。同一人物は常に同じラベルになる
+  (`ANONYMIZE_SALT`が同じである限り)
+- **本文中の個人情報**: メールアドレス・電話番号・Discordメンション・氏名
+  (Sudachi辞書の人名タグ、および「〇〇と申します」等の自己紹介パターンで検出)
+
+このBotは複数サーバーを一括処理する仕様のため、サーバーごとの受講生名簿(ロスター)は
+使わない。氏名検出はSudachi辞書ベースのみで、100%の検出を保証するものではない
+(質問回答AIプロジェクトのREADME参照)。
+
+投稿者IDと匿名ラベルの対応表は`data/author_map.json`にキャッシュされるが、
+GitHub Actionsの実行環境は毎回破棄されるため実際には引き継がれない。ただし
+匿名ラベル自体は`ANONYMIZE_SALT`とIDから決定論的に計算されるため、対応表が
+なくても同一人物には毎回同じラベルが振られる。
+
+## スタッフ投稿カウント(2026-08-14追加)
+
+「サポーター」「認定講師」「管理者」「サーバー管理」ロール(ロール名は`STAFF_ROLE_NAMES`で変更可)を
+持つメンバーが、各サーバーの対象チャンネルへ何回投稿したかを実行ごとに集計し、
+対象サーバー設定シート内の「投稿カウント」タブに追記していく。過去の推移がすべて残る
+ログ形式(実行のたびに新しい行が増える。累計ではない)。
+
+- 記録される情報: 実行日時・サーバー名・ユーザー表示名(ニックネーム→表示名→ユーザー名の優先順)・
+  該当ロール・投稿数・対象期間
+- ユーザー表示名は実名に近い情報のため、Gemini API側のマスキング処理とは別経路で扱う
+  (Gemini APIには送らず、Google Sheetsへの書き込みのみに使う)
+- `GCP_SERVICE_ACCOUNT_JSON`・`ROLE_COUNT_SHEET_ID`が未設定の場合はこの機能全体がスキップされ、
+  要約・投稿の本体機能には影響しない
+
+### 初回セットアップ(サービスアカウントの準備)
+
+このBot専用のGoogle Cloudサービスアカウントを新規作成する(質問回答AIプロジェクトとは
+認証情報を分離するため、既存のものを流用しない)。
+
+1. [Google Cloud Console](https://console.cloud.google.com/)でプロジェクトを作成(または既存を使用)
+2. 「Google Sheets API」を検索して有効化
+3. 「APIとサービス」→「認証情報」→サービスアカウントを作成
+4. 作成したサービスアカウントの「キー」タブから、JSON形式の鍵を作成・ダウンロード
+5. 対象サーバー設定シートを開き、右上「共有」からサービスアカウントのメールアドレス
+   (JSON内の`client_email`)を**編集者**として追加
+6. ダウンロードしたJSONファイルの中身をそのままGitHub Secretsの`GCP_SERVICE_ACCOUNT_JSON`に貼り付ける
+   (ローカル実行時は`.env`の`GCP_SERVICE_ACCOUNT_JSON`にJSONファイルのパスを指定する)
+7. GitHub Secretsに`ROLE_COUNT_SHEET_ID`(対象サーバー設定シートのID、`.env.example`参照)を登録する
+
+初回実行時、「投稿カウント」ワークシートが自動作成され、ヘッダー行も自動で書き込まれる。
+
 ## 手動実行・ログの確認
 
 - GitHubリポジトリの「Actions」タブ →「Discord Weekly Summary」→「Run workflow」で手動実行できる
@@ -60,6 +113,9 @@
 | `DISCORD_BOT_TOKEN` | Bot Token | Discord Developer Portal → 対象アプリ →「Bot」→「Reset Token」 |
 | `GEMINI_API_KEY` | Gemini APIキー(無料枠) | https://aistudio.google.com/apikey |
 | `CONFIG_CSV_URL` | 対象サーバー設定シートのCSV公開URL | 上記スプレッドシートの `ファイル→共有→ウェブに公開`、またはURL末尾を`/export?format=csv`にしたもの |
+| `ANONYMIZE_SALT` | 匿名化ハッシュ用のランダム文字列 | 一度決めたら変更しないこと(変更すると同じ投稿者でも別のラベルになる) |
+| `GCP_SERVICE_ACCOUNT_JSON` | スタッフ投稿カウント用サービスアカウントのJSON鍵(中身をそのまま貼り付け) | 上記「スタッフ投稿カウント」セクション参照 |
+| `ROLE_COUNT_SHEET_ID` | 投稿カウントを記録するスプレッドシートのID | `.env.example`のデフォルト値(対象サーバー設定シートと同じ) |
 
 いずれもリポジトリの Settings → Secrets and variables → Actions から登録・編集する。
 

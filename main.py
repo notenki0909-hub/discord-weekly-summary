@@ -10,6 +10,9 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 
+import sheets_client
+from anonymize import AuthorPseudonymizer, mask_content
+
 # 実行環境のロケールによらずUTF-8で入出力する(GitHub Actions実行環境での文字化け対策)
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -21,6 +24,21 @@ load_dotenv(BASE_DIR / ".env")
 DISCORD_BOT_TOKEN = os.environ["DISCORD_BOT_TOKEN"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 CONFIG_CSV_URL = os.environ["CONFIG_CSV_URL"]
+ANONYMIZE_SALT = os.environ["ANONYMIZE_SALT"]
+
+# スタッフロール投稿カウント機能(2026-08-14追加)。両方が空の場合は機能自体を無効化する
+# (サービスアカウント未設定でもBot本体の要約・投稿機能は動き続けるようにするため)。
+GCP_SERVICE_ACCOUNT_JSON = os.environ.get("GCP_SERVICE_ACCOUNT_JSON", "")
+ROLE_COUNT_SHEET_ID = os.environ.get("ROLE_COUNT_SHEET_ID", "")
+STAFF_ROLE_NAMES = {
+    n.strip()
+    for n in os.environ.get("STAFF_ROLE_NAMES", "サポーター,認定講師,管理者,サーバー管理").split(",")
+    if n.strip()
+}
+
+DATA_DIR = BASE_DIR / "data"
+AUTHOR_MAP_PATH = DATA_DIR / "author_map.json"
+pseudonymizer = AuthorPseudonymizer(AUTHOR_MAP_PATH, ANONYMIZE_SALT)
 
 DISCORD_API = "https://discord.com/api/v10"
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
@@ -128,6 +146,13 @@ def fetch_config_rows():
     return servers
 
 
+def get_role_id_to_name(guild_id: str) -> dict:
+    """サーバーのロールID→ロール名の対応表を取得する(スタッフ投稿カウント用)。"""
+    resp = requests.get(f"{DISCORD_API}/guilds/{guild_id}/roles", headers=discord_headers(), timeout=30)
+    resp.raise_for_status()
+    return {r["id"]: r["name"] for r in resp.json()}
+
+
 def get_target_channels(guild_id: str, category_ids: list, extra_channel_ids: list):
     resp = requests.get(f"{DISCORD_API}/guilds/{guild_id}/channels", headers=discord_headers(), timeout=30)
     resp.raise_for_status()
@@ -184,13 +209,25 @@ def fetch_recent_messages(channel_id: str, since: datetime, until: datetime):
                 reached_start = True
                 continue
             if m.get("content"):
+                author = m.get("author", {})
+                author_id = author.get("id", "unknown")
+                member = m.get("member") or {}
                 messages.append(
                     {
-                        "author": m.get("member", {}).get("nick")
-                        or m.get("author", {}).get("global_name")
-                        or m.get("author", {}).get("username", "unknown"),
-                        "content": m["content"],
+                        # 実名(ニックネーム)は保存せず、投稿者IDから決定論的に生成した
+                        # 匿名ラベルに置き換える(2026-08-14追加、質問回答AIプロジェクトから移植)。
+                        # Geminiに渡すのはこのpseudonymラベルとcontentのみ(下記のrole_ids/
+                        # display_nameはスタッフ投稿カウント専用でGeminiには渡さない)。
+                        "author": pseudonymizer.pseudonymize(author_id),
+                        # 本文中のメール・電話番号・メンション・氏名もマスキングしてから
+                        # Gemini APIに渡す(同上)。
+                        "content": mask_content(m["content"]),
                         "timestamp": ts,
+                        # スタッフロール投稿カウント用(2026-08-14追加)。GET /channels/.../messages
+                        # のレスポンスには投稿者のサーバー内ロールを含むpartial member情報が
+                        # 付随するため、追加のAPI呼び出しなしで取得できる。
+                        "role_ids": member.get("roles", []),
+                        "display_name": member.get("nick") or author.get("global_name") or author.get("username", "unknown"),
                     }
                 )
 
@@ -304,6 +341,35 @@ def split_for_discord(text: str, limit: int = 1900):
     return chunks
 
 
+def count_staff_posts(channel_messages: dict, role_id_to_name: dict, target_role_names: set) -> dict:
+    """スタッフロール(サポーター・認定講師・管理者・サーバー管理など)保有者の、
+    全対象チャンネル横断の投稿数を集計する。
+
+    戻り値: {表示名: {"roles": {該当ロール名の集合}, "count": 投稿数}}
+    1人が複数の対象ロールを持つ場合はrolesに全て記録する(投稿カウントは1件のまま)。
+    """
+    counts = {}
+    for msgs in channel_messages.values():
+        for m in msgs:
+            matched = {role_id_to_name[rid] for rid in m.get("role_ids", []) if role_id_to_name.get(rid) in target_role_names}
+            if not matched:
+                continue
+            entry = counts.setdefault(m["display_name"], {"roles": set(), "count": 0})
+            entry["roles"].update(matched)
+            entry["count"] += 1
+    return counts
+
+
+def build_role_count_rows(server_name: str, counts: dict, since: datetime, until: datetime) -> list:
+    now_str = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
+    since_str = since.astimezone(JST).strftime("%Y-%m-%d %H:%M")
+    until_str = until.astimezone(JST).strftime("%Y-%m-%d %H:%M")
+    return [
+        [now_str, server_name, name, "・".join(sorted(data["roles"])), data["count"], since_str, until_str]
+        for name, data in counts.items()
+    ]
+
+
 def main():
     now_jst = datetime.now(timezone.utc).astimezone(JST)
     today_wd = now_jst.weekday()
@@ -313,6 +379,13 @@ def main():
 
     servers = fetch_config_rows()
     log.info("対象サーバー数: %d", len(servers))
+
+    # スタッフロール投稿カウント機能。サービスアカウント未設定の環境(ローカル検証等)
+    # でもBot本体の要約・投稿は動くよう、未設定時は機能ごとスキップする。
+    role_count_enabled = bool(GCP_SERVICE_ACCOUNT_JSON and ROLE_COUNT_SHEET_ID)
+    all_role_count_rows = []
+    if not role_count_enabled:
+        log.info("スタッフ投稿カウント機能は無効です(GCP_SERVICE_ACCOUNT_JSON/ROLE_COUNT_SHEET_ID未設定)")
 
     for server in servers:
         if today_wd not in server["schedule_days"]:
@@ -343,9 +416,27 @@ def main():
             summary = summarize_with_gemini(server["name"], since, period_end, channel_messages)
             post_to_discord(server["dest_channel_id"], summary)
             log.info("%s: 要約投稿完了", server["name"])
+
+            if role_count_enabled:
+                role_id_to_name = get_role_id_to_name(server["guild_id"])
+                staff_counts = count_staff_posts(channel_messages, role_id_to_name, STAFF_ROLE_NAMES)
+                rows = build_role_count_rows(server["name"], staff_counts, since, period_end)
+                all_role_count_rows.extend(rows)
+                log.info("%s: スタッフ投稿カウント対象 %d名", server["name"], len(rows))
         except Exception:
             log.exception("%s の処理中にエラーが発生しました", server["name"])
         time.sleep(1)
+
+    pseudonymizer.save()
+
+    if role_count_enabled and all_role_count_rows:
+        try:
+            spreadsheet = sheets_client.connect(GCP_SERVICE_ACCOUNT_JSON, ROLE_COUNT_SHEET_ID)
+            ws = sheets_client.get_or_create_worksheet(spreadsheet)
+            sheets_client.append_rows(ws, all_role_count_rows)
+            log.info("スタッフ投稿カウントをスプレッドシートに記録しました(%d行)", len(all_role_count_rows))
+        except Exception:
+            log.exception("スタッフ投稿カウントのスプレッドシート書き込みに失敗しました")
 
 
 if __name__ == "__main__":
