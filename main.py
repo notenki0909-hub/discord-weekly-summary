@@ -66,6 +66,15 @@ def parse_schedule_days(schedule_str: str) -> set:
     return days if days else set(range(7))
 
 
+def parse_staff_role_names(staff_role_names_str: str) -> set:
+    """「カウント対象ロール」列の文字列をロール名の集合に変換する(2026-08-14追加)。
+    空欄の場合は共通設定(STAFF_ROLE_NAMES)を使う。"""
+    s = (staff_role_names_str or "").strip()
+    if not s:
+        return STAFF_ROLE_NAMES
+    return {n.strip() for n in s.split(",") if n.strip()}
+
+
 def compute_lookback_days(schedule_days: set, today_wd: int) -> int:
     """今日の実行が対象とすべき「何日分遡るか」を、設定された実行曜日から逆算する。
     例:月・木指定の場合、月曜実行時は4日分(木→月)、木曜実行時は3日分(月→木)。"""
@@ -130,6 +139,7 @@ def fetch_config_rows():
         extra_channel_ids = [c.strip() for c in row[6].split(",") if c.strip()]
         dest_channel_id = row[7].strip()
         schedule_str = row[8].strip() if len(row) > 8 else ""
+        staff_role_names_str = row[9].strip() if len(row) > 9 else ""
 
         if not enabled or not guild_id or not dest_channel_id:
             continue
@@ -142,6 +152,7 @@ def fetch_config_rows():
                 "extra_channel_ids": extra_channel_ids,
                 "dest_channel_id": dest_channel_id,
                 "schedule_days": parse_schedule_days(schedule_str),
+                "staff_role_names": parse_staff_role_names(staff_role_names_str),
             }
         )
     return servers
@@ -450,9 +461,9 @@ def main():
                 role_id_to_name = get_role_id_to_name(server["guild_id"])
                 # 原因切り分け用の詳細ログ(2026-08-14追加)。ロール名の不一致
                 # (絵文字・空白・全角半角違い等)やmember情報の欠落を判別できるようにする。
-                matched_role_names = sorted(set(role_id_to_name.values()) & STAFF_ROLE_NAMES)
+                matched_role_names = sorted(set(role_id_to_name.values()) & server["staff_role_names"])
                 log.info(
-                    "%s: サーバーのロール一覧=%s / STAFF_ROLE_NAMESと一致=%s",
+                    "%s: サーバーのロール一覧=%s / カウント対象ロールと一致=%s",
                     server["name"], sorted(role_id_to_name.values()), matched_role_names,
                 )
                 all_msgs = [m for msgs in channel_messages.values() for m in msgs]
@@ -462,7 +473,7 @@ def main():
                     server["name"], len(msgs_with_role_ids), len(all_msgs),
                 )
 
-                staff_counts = count_staff_posts(channel_messages, role_id_to_name, STAFF_ROLE_NAMES)
+                staff_counts = count_staff_posts(channel_messages, role_id_to_name, server["staff_role_names"])
                 rows = build_role_count_rows(server["name"], staff_counts, since, period_end)
                 all_role_count_rows.extend(rows)
                 log.info("%s: スタッフ投稿カウント対象 %d名", server["name"], len(rows))
