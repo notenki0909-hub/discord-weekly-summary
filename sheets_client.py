@@ -43,7 +43,17 @@ def get_or_create_worksheet(spreadsheet):
 
 
 def append_rows(ws, rows: list):
-    """rowsは各要素がHEADERの列順に対応するリスト。"""
+    """rowsは各要素がHEADERの列順に対応するリスト。
+
+    table_rangeを明示しないと、I〜L列のQUERY集計結果もテーブルとして
+    誤検出され、追記先がA〜G列からI列以降にずれる不具合が過去に発生した
+    （2026-08-15〜2026-08-20の実行分がI〜O列に誤って書き込まれていた）。
+    そのため、追記対象を必ずA〜G列に固定する。
+    """
     if not rows:
         return
-    ws.append_rows(rows, value_input_option="USER_ENTERED")
+    ws.append_rows(
+        rows,
+        value_input_option="USER_ENTERED",
+        table_range=f"A1:{chr(ord('A') + len(HEADER) - 1)}1",
+    )
