@@ -1,0 +1,32 @@
+name: Keepalive
+
+# GitHubは60日間リポジトリに動きがないとスケジュール実行を自動停止するため、
+# 月1回ダミーコミットで停止を防ぐ(summary.ymlの定期実行を維持する目的)
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "0 0 1 * *"
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Commit keepalive timestamp
+        run: |
+          date -u +"%Y-%m-%dT%H:%M:%SZ" > .keepalive
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .keepalive
+          git commit -m "chore: keepalive (スケジュール実行の自動停止防止)"
+          git push
+
+      - name: Ensure summary workflow is enabled
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/summary.yml/enable"
